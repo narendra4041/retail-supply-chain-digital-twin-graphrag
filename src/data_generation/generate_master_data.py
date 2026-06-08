@@ -9,6 +9,11 @@ from typing import Dict, List
 import pandas as pd
 from faker import Faker
 
+from datetime import datetime, timezone
+
+
+def utc_now_string() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 fake = Faker()
 
@@ -81,8 +86,8 @@ def generate_suppliers(num_suppliers: int) -> pd.DataFrame:
                 "contract_start_date": contract_start,
                 "contract_end_date": contract_end,
                 "preferred_supplier_flag": random.choice([True, False, False]),
-                "created_at": pd.Timestamp.utcnow(),
-                "updated_at": pd.Timestamp.utcnow(),
+                "created_at": utc_now_string(),
+                "updated_at": utc_now_string(),
             }
         )
 
@@ -116,8 +121,8 @@ def generate_products(num_products: int, suppliers: pd.DataFrame) -> pd.DataFram
                 "weight_kg": round(random.uniform(0.2, 80.0), 3),
                 "volume_m3": round(random.uniform(0.01, 4.0), 4),
                 "active_flag": random.choice([True, True, True, False]),
-                "created_at": pd.Timestamp.utcnow(),
-                "updated_at": pd.Timestamp.utcnow(),
+                "created_at": utc_now_string(),
+                "updated_at": utc_now_string(),
             }
         )
 
@@ -140,8 +145,8 @@ def generate_warehouses(num_warehouses: int) -> pd.DataFrame:
                 "region": location["region"],
                 "capacity_units": random.randint(100_000, 1_500_000),
                 "current_utilization_pct": round(random.uniform(0.35, 0.92), 4),
-                "created_at": pd.Timestamp.utcnow(),
-                "updated_at": pd.Timestamp.utcnow(),
+                "created_at": utc_now_string(),
+                "updated_at": utc_now_string(),
             }
         )
 
@@ -166,8 +171,8 @@ def generate_stores(num_stores: int, warehouses: pd.DataFrame) -> pd.DataFrame:
                 "store_type": random.choice(STORE_TYPES),
                 "size_sq_m": random.randint(800, 18_000),
                 "warehouse_id": random.choice(warehouse_ids),
-                "created_at": pd.Timestamp.utcnow(),
-                "updated_at": pd.Timestamp.utcnow(),
+                "created_at": utc_now_string(),
+                "updated_at": utc_now_string(),
             }
         )
 
@@ -190,8 +195,8 @@ def generate_customers(num_customers: int) -> pd.DataFrame:
                 "customer_segment": random.choice(CUSTOMER_SEGMENTS),
                 "loyalty_tier": random.choice(LOYALTY_TIERS),
                 "signup_date": fake.date_between(start_date="-5y", end_date="today"),
-                "created_at": pd.Timestamp.utcnow(),
-                "updated_at": pd.Timestamp.utcnow(),
+                "created_at": utc_now_string(),
+                "updated_at": utc_now_string(),
             }
         )
 
@@ -203,7 +208,14 @@ def write_parquet(df: pd.DataFrame, output_dir: Path, dataset_name: str) -> None
     dataset_dir.mkdir(parents=True, exist_ok=True)
 
     output_file = dataset_dir / f"{dataset_name}.parquet"
-    df.to_parquet(output_file, index=False, engine="pyarrow")
+
+    df.to_parquet(
+        output_file,
+        index=False,
+        engine="pyarrow",
+        coerce_timestamps="us",
+        allow_truncated_timestamps=True,
+    )
 
     print(f"Wrote {len(df):,} records to {output_file}")
 
