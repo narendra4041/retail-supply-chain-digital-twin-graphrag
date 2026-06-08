@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://retail-supplychain-digital-twin/schemas/events/inventory_updated.schema.json",
+  "title": "InventoryUpdatedEvent",
+  "description": "Schema for inventory_updated events from warehouse and store inventory systems.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_type",
+    "event_version",
+    "event_timestamp",
+    "source_system",
+    "correlation_id",
+    "payload"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string"
+    },
+    "event_type": {
+      "type": "string",
+      "const": "inventory_updated"
+    },
+    "event_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "event_timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source_system": {
+      "type": "string",
+      "enum": ["warehouse_management_system", "store_inventory_system", "pos", "ecommerce"]
+    },
+    "correlation_id": {
+      "type": "string"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "inventory_event_id",
+        "product_id",
+        "location_type",
+        "location_id",
+        "movement_type",
+        "quantity_change",
+        "stock_on_hand_after",
+        "reserved_stock_after",
+        "reorder_point",
+        "safety_stock"
+      ],
+      "properties": {
+        "inventory_event_id": {
+          "type": "string"
+        },
+        "product_id": {
+          "type": "string"
+        },
+        "location_type": {
+          "type": "string",
+          "enum": ["warehouse", "store"]
+        },
+        "location_id": {
+          "type": "string"
+        },
+        "movement_type": {
+          "type": "string",
+          "enum": [
+            "sale",
+            "return",
+            "replenishment",
+            "shipment_out",
+            "shipment_in",
+            "adjustment",
+            "damage",
+            "reservation",
+            "reservation_release"
+          ]
+        },
+        "quantity_change": {
+          "type": "integer"
+        },
+        "stock_on_hand_after": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reserved_stock_after": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reorder_point": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "safety_stock": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://retail-supplychain-digital-twin/schemas/events/shipment_created.schema.json",
+  "title": "ShipmentCreatedEvent",
+  "description": "Schema for shipment_created events from transport management systems.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_type",
+    "event_version",
+    "event_timestamp",
+    "source_system",
+    "correlation_id",
+    "payload"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string"
+    },
+    "event_type": {
+      "type": "string",
+      "const": "shipment_created"
+    },
+    "event_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "event_timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source_system": {
+      "type": "string",
+      "enum": ["transport_management_system", "supplier_portal", "warehouse_management_system"]
+    },
+    "correlation_id": {
+      "type": "string"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "shipment_id",
+        "shipment_type",
+        "source_type",
+        "source_id",
+        "destination_type",
+        "destination_id",
+        "product_id",
+        "quantity",
+        "shipment_date",
+        "expected_delivery_date",
+        "actual_delivery_date",
+        "shipment_status",
+        "carrier",
+        "delay_days"
+      ],
+      "properties": {
+        "shipment_id": {
+          "type": "string"
+        },
+        "shipment_type": {
+          "type": "string",
+          "enum": ["supplier_to_warehouse", "warehouse_to_store"]
+        },
+        "source_type": {
+          "type": "string",
+          "enum": ["supplier", "warehouse"]
+        },
+        "source_id": {
+          "type": "string"
+        },
+        "destination_type": {
+          "type": "string",
+          "enum": ["warehouse", "store"]
+        },
+        "destination_id": {
+          "type": "string"
+        },
+        "product_id": {
+          "type": "string"
+        },
+        "quantity": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "shipment_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "expected_delivery_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "actual_delivery_date": {
+          "type": ["string", "null"],
+          "format": "date"
+        },
+        "shipment_status": {
+          "type": "string",
+          "enum": ["created", "in_transit", "delivered", "delayed"]
+        },
+        "carrier": {
+          "type": "string",
+          "enum": ["DHL", "PostNord", "DB Schenker", "Maersk", "UPS", "FedEx"]
+        },
+        "delay_days": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

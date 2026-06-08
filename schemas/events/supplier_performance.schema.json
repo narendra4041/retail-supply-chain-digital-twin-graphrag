@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://retail-supplychain-digital-twin/schemas/events/supplier_performance.schema.json",
+  "title": "SupplierPerformanceEvent",
+  "description": "Schema for supplier_performance events from supplier management and procurement systems.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_type",
+    "event_version",
+    "event_timestamp",
+    "source_system",
+    "correlation_id",
+    "payload"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string"
+    },
+    "event_type": {
+      "type": "string",
+      "const": "supplier_performance"
+    },
+    "event_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "event_timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source_system": {
+      "type": "string",
+      "enum": ["supplier_management_system", "procurement_system", "quality_management_system"]
+    },
+    "correlation_id": {
+      "type": "string"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "performance_id",
+        "supplier_id",
+        "product_id",
+        "performance_month",
+        "on_time_delivery_rate",
+        "defect_rate",
+        "avg_delay_days",
+        "fulfilled_quantity",
+        "rejected_quantity",
+        "risk_score"
+      ],
+      "properties": {
+        "performance_id": {
+          "type": "string"
+        },
+        "supplier_id": {
+          "type": "string"
+        },
+        "product_id": {
+          "type": "string"
+        },
+        "performance_month": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}$"
+        },
+        "on_time_delivery_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "defect_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "avg_delay_days": {
+          "type": "number",
+          "minimum": 0
+        },
+        "fulfilled_quantity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rejected_quantity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "risk_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    }
+  }
+}

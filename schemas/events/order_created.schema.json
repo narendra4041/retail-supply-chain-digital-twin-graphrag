@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://retail-supplychain-digital-twin/schemas/events/order_created.schema.json",
+  "title": "OrderCreatedEvent",
+  "description": "Schema for order_created events from ecommerce and POS systems.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_type",
+    "event_version",
+    "event_timestamp",
+    "source_system",
+    "correlation_id",
+    "payload"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "description": "Unique event identifier."
+    },
+    "event_type": {
+      "type": "string",
+      "const": "order_created"
+    },
+    "event_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "event_timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source_system": {
+      "type": "string",
+      "enum": ["ecommerce", "pos"]
+    },
+    "correlation_id": {
+      "type": "string",
+      "description": "Identifier used to trace related events across systems."
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "order_id",
+        "customer_id",
+        "store_id",
+        "order_channel",
+        "order_status",
+        "payment_method",
+        "currency",
+        "order_total",
+        "items"
+      ],
+      "properties": {
+        "order_id": {
+          "type": "string"
+        },
+        "customer_id": {
+          "type": "string"
+        },
+        "store_id": {
+          "type": "string"
+        },
+        "order_channel": {
+          "type": "string",
+          "enum": ["store", "ecommerce", "mobile_app"]
+        },
+        "order_status": {
+          "type": "string",
+          "enum": ["created", "paid", "cancelled"]
+        },
+        "payment_method": {
+          "type": "string",
+          "enum": ["card", "invoice", "wallet", "gift_card"]
+        },
+        "currency": {
+          "type": "string",
+          "enum": ["SEK", "EUR", "USD", "GBP"]
+        },
+        "order_total": {
+          "type": "number",
+          "minimum": 0
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "order_item_id",
+              "product_id",
+              "quantity",
+              "unit_price",
+              "discount_pct",
+              "line_total"
+            ],
+            "properties": {
+              "order_item_id": {
+                "type": "string"
+              },
+              "product_id": {
+                "type": "string"
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "unit_price": {
+                "type": "number",
+                "minimum": 0
+              },
+              "discount_pct": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "line_total": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

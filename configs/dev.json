@@ -1,0 +1,28 @@
+{
+  "environment": "dev",
+  "azure": {
+    "storage_account": "stretaildtdev4041"
+  },
+  "unity_catalog": {
+    "catalog": "retail_digital_twin_dev",
+    "schemas": {
+      "bronze": "bronze",
+      "silver": "silver",
+      "gold": "gold",
+      "monitoring": "monitoring",
+      "ml": "ml",
+      "graph": "graph"
+    }
+  },
+  "paths": {
+    "landing_base": "abfss://landing@stretaildtdev4041.dfs.core.windows.net/retail",
+    "checkpoints_base": "abfss://checkpoints@stretaildtdev4041.dfs.core.windows.net/retail_digital_twin_dev"
+  },
+  "master_data": {
+    "suppliers": "master/suppliers/",
+    "products": "master/products/",
+    "warehouses": "master/warehouses/",
+    "stores": "master/stores/",
+    "customers": "master/customers/"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "event_id": "evt_00000001",
+  "event_type": "order_created",
+  "event_version": "1.0",
+  "event_timestamp": "2026-06-05T12:30:00Z",
+  "source_system": "ecommerce",
+  "correlation_id": "corr_00000001",
+  "payload": {
+    "order_id": "ORD00000001",
+    "customer_id": "CUST000001",
+    "store_id": "ST0001",
+    "order_channel": "ecommerce",
+    "order_status": "created",
+    "payment_method": "card",
+    "currency": "SEK",
+    "order_total": 2498.0,
+    "items": [
+      {
+        "order_item_id": "OI00000001",
+        "product_id": "PROD000001",
+        "quantity": 2,
+        "unit_price": 1249.0,
+        "discount_pct": 0.0,
+        "line_total": 2498.0
+      }
+    ]
+  }
+}
