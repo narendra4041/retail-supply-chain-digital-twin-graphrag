@@ -8,9 +8,12 @@ from pipelines.retail_eventhub_pipeline.utils.config import (
     get_eventhub_config,
     get_schema_name,
 )
-from pipelines.retail_eventhub_pipeline.utils.eventhub import get_eventhub_kafka_options
+from pipelines.retail_eventhub_pipeline.utils.eventhub import (
+    build_eventhub_kafka_jaas_config,
+    get_eventhub_kafka_options,
+)
 
-ENVIRONMENT = "dev"
+ENVIRONMENT = spark.conf.get("ENVIRONMENT", "dev")
 
 catalog_name = get_catalog_name(ENVIRONMENT)
 bronze_schema = get_schema_name("bronze", ENVIRONMENT)
@@ -21,9 +24,15 @@ from pipelines.retail_eventhub_pipeline.utils.config import get_secret_config
 
 secret_config = get_secret_config(ENVIRONMENT)
 
-SECRET_SCOPE = secret_config["scope"]
-SECRET_KEY = secret_config["keys"]["eventhub_consumer_connection_string"]
+EVENT_HUB_SECRET_SCOPE = spark.conf.get("EVENT_HUB_SECRET_SCOPE")
+EVENT_HUB_CONNECTION_SECRET_KEY = spark.conf.get("EVENT_HUB_CONNECTION_SECRET_KEY")
 
+event_hub_connection_string = dbutils.secrets.get(
+    scope=EVENT_HUB_SECRET_SCOPE,
+    key=EVENT_HUB_CONNECTION_SECRET_KEY,
+)
+
+kafka_jaas_config = build_eventhub_kafka_jaas_config(event_hub_connection_string)
 
 @dp.table(
     name=f"{catalog_name}.{bronze_schema}.supplier_performance_events_raw",
@@ -34,8 +43,7 @@ def supplier_performance_events_raw():
         fully_qualified_namespace=eventhub_config["fully_qualified_namespace"],
         eventhub_name=eventhub_config["eventhub_name"],
         consumer_group=eventhub_config["consumer_group"],
-        connection_string_secret_scope=SECRET_SCOPE,
-        connection_string_secret_key=SECRET_KEY,
+        kafka_jaas_config=kafka_jaas_config,
     )
 
     return (
