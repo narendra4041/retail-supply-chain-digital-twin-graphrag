@@ -11,6 +11,8 @@ from typing import Any, Dict, List
 import pandas as pd
 
 from src.common.schema_validator import load_json_file, validate_json_event
+from azure.eventhub import EventData, EventHubProducerClient
+from azure.identity import DefaultAzureCredential
 
 
 ORDER_CHANNELS = ["store", "ecommerce", "mobile_app"]
@@ -352,6 +354,48 @@ def write_jsonl_event(event: Dict[str, Any], output_file: Path) -> None:
     with output_file.open("a", encoding="utf-8") as file:
         file.write(json.dumps(event) + "\n")
 
+def send_events_to_eventhub(
+    events: List[Dict[str, Any]],
+    fully_qualified_namespace: str,
+    eventhub_name: str,
+) -> None:
+    """
+    Sends events to Azure Event Hubs using Microsoft Entra ID authentication.
+
+    Local development:
+      - uses az login through DefaultAzureCredential
+
+    Azure runtime:
+      - uses managed identity through DefaultAzureCredential
+    """
+    credential = DefaultAzureCredential()
+
+    producer = EventHubProducerClient(
+        fully_qualified_namespace=fully_qualified_namespace,
+        eventhub_name=eventhub_name,
+        credential=credential,
+    )
+
+    try:
+        event_data_batch = producer.create_batch()
+
+        for event in events:
+            event_json = json.dumps(event)
+            event_data = EventData(event_json)
+
+            try:
+                event_data_batch.add(event_data)
+            except ValueError:
+                producer.send_batch(event_data_batch)
+
+                event_data_batch = producer.create_batch()
+                event_data_batch.add(event_data)
+
+        if len(event_data_batch) > 0:
+            producer.send_batch(event_data_batch)
+
+    finally:
+        producer.close()
 
 def generate_order_events_local(
     master_data_dir: Path,
@@ -453,6 +497,90 @@ def generate_supplier_performance_events_local(
 
     print(f"Wrote {num_events:,} supplier_performance events to {output_file}")
 
+def build_events(
+    event_type: str,
+    master_data_dir: Path,
+    num_events: int,
+    seed: int,
+) -> List[Dict[str, Any]]:
+    random.seed(seed)
+
+    master_data = load_master_data(master_data_dir)
+
+    events = []
+
+    for sequence in range(1, num_events + 1):
+        if event_type == "order_created":
+            event = build_order_created_event(
+                customers=master_data["customers"],
+                stores=master_data["stores"],
+                products=master_data["products"],
+                order_sequence=sequence,
+            )
+
+        elif event_type == "inventory_updated":
+            event = build_inventory_updated_event(
+                products=master_data["products"],
+                warehouses=master_data["warehouses"],
+                stores=master_data["stores"],
+                inventory_sequence=sequence,
+            )
+
+        elif event_type == "shipment_created":
+            event = build_shipment_created_event(
+                suppliers=master_data["suppliers"],
+                products=master_data["products"],
+                warehouses=master_data["warehouses"],
+                stores=master_data["stores"],
+                shipment_sequence=sequence,
+            )
+
+        elif event_type == "supplier_performance":
+            event = build_supplier_performance_event(
+                suppliers=master_data["suppliers"],
+                products=master_data["products"],
+                performance_sequence=sequence,
+            )
+
+        else:
+            raise ValueError(f"Unsupported event_type: {event_type}")
+
+        events.append(event)
+
+    return events
+
+def generate_events_eventhub(
+    event_type: str,
+    master_data_dir: Path,
+    schema_file: Path,
+    fully_qualified_namespace: str,
+    eventhub_name: str,
+    num_events: int,
+    seed: int,
+) -> None:
+    schema = load_json_file(str(schema_file))
+
+    events = build_events(
+        event_type=event_type,
+        master_data_dir=master_data_dir,
+        num_events=num_events,
+        seed=seed,
+    )
+
+    for event in events:
+        validate_json_event(event, schema)
+
+    send_events_to_eventhub(
+        events=events,
+        fully_qualified_namespace=fully_qualified_namespace,
+        eventhub_name=eventhub_name,
+    )
+
+    print(
+        f"Sent {num_events:,} {event_type} events to Event Hub "
+        f"{fully_qualified_namespace}/{eventhub_name}"
+    )
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate production-style retail transactional events."
@@ -460,9 +588,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--mode",
-        choices=["local"],
+        choices=["local", "eventhub"],
         default="local",
-        help="Producer mode. Currently supports local JSONL output.",
+        help="Producer mode. Supports local JSONL output or Azure Event Hubs.",
     )
     parser.add_argument(
         "--master-data-dir",
@@ -502,6 +630,17 @@ def parse_args() -> argparse.Namespace:
         default="order_created",
         help="Type of event to generate.",
     )
+    parser.add_argument(
+        "--fully-qualified-namespace",
+        default=None,
+        help="Azure Event Hubs fully qualified namespace, for example ehns-name.servicebus.windows.net.",
+    )
+
+    parser.add_argument(
+        "--eventhub-name",
+        default=None,
+        help="Azure Event Hub name.",
+    )
 
     return parser.parse_args()
 
@@ -509,41 +648,56 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    if args.mode != "local":
-        raise ValueError("Only local mode is currently supported.")
+    if args.mode == "local":
+        if args.event_type == "order_created":
+            generate_order_events_local(
+                master_data_dir=Path(args.master_data_dir),
+                output_file=Path(args.output_file),
+                schema_file=Path(args.schema_file),
+                num_events=args.num_events,
+                seed=args.seed,
+            )
 
-    if args.event_type == "order_created":
-        generate_order_events_local(
-            master_data_dir=Path(args.master_data_dir),
-            output_file=Path(args.output_file),
-            schema_file=Path(args.schema_file),
-            num_events=args.num_events,
-            seed=args.seed,
-        )
+        elif args.event_type == "inventory_updated":
+            generate_inventory_events_local(
+                master_data_dir=Path(args.master_data_dir),
+                output_file=Path(args.output_file),
+                schema_file=Path(args.schema_file),
+                num_events=args.num_events,
+                seed=args.seed,
+            )
 
-    elif args.event_type == "inventory_updated":
-        generate_inventory_events_local(
-            master_data_dir=Path(args.master_data_dir),
-            output_file=Path(args.output_file),
-            schema_file=Path(args.schema_file),
-            num_events=args.num_events,
-            seed=args.seed,
-        )
+        elif args.event_type == "shipment_created":
+            generate_shipment_events_local(
+                master_data_dir=Path(args.master_data_dir),
+                output_file=Path(args.output_file),
+                schema_file=Path(args.schema_file),
+                num_events=args.num_events,
+                seed=args.seed,
+            )
 
-    elif args.event_type == "shipment_created":
-        generate_shipment_events_local(
+        elif args.event_type == "supplier_performance":
+            generate_supplier_performance_events_local(
+                master_data_dir=Path(args.master_data_dir),
+                output_file=Path(args.output_file),
+                schema_file=Path(args.schema_file),
+                num_events=args.num_events,
+                seed=args.seed,
+            )
+
+    elif args.mode == "eventhub":
+        if not args.fully_qualified_namespace:
+            raise ValueError("--fully-qualified-namespace is required for eventhub mode.")
+
+        if not args.eventhub_name:
+            raise ValueError("--eventhub-name is required for eventhub mode.")
+
+        generate_events_eventhub(
+            event_type=args.event_type,
             master_data_dir=Path(args.master_data_dir),
-            output_file=Path(args.output_file),
             schema_file=Path(args.schema_file),
-            num_events=args.num_events,
-            seed=args.seed,
-        )
-    
-    elif args.event_type == "supplier_performance":
-        generate_supplier_performance_events_local(
-            master_data_dir=Path(args.master_data_dir),
-            output_file=Path(args.output_file),
-            schema_file=Path(args.schema_file),
+            fully_qualified_namespace=args.fully_qualified_namespace,
+            eventhub_name=args.eventhub_name,
             num_events=args.num_events,
             seed=args.seed,
         )
