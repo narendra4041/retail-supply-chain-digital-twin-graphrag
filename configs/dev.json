@@ -18,11 +18,44 @@
     "landing_base": "abfss://landing@stretaildtdev4041.dfs.core.windows.net/retail",
     "checkpoints_base": "abfss://checkpoints@stretaildtdev4041.dfs.core.windows.net/retail_digital_twin_dev"
   },
+  "event_hubs": {
+    "fully_qualified_namespace": "ehns-retail-digital-twin-dev.servicebus.windows.net",
+    "events": {
+      "order_created": {
+        "eventhub_name": "retail-orders-events",
+        "schema_file": "schemas/events/order_created.schema.json"
+      },
+      "inventory_updated": {
+        "eventhub_name": "retail-inventory-events",
+        "schema_file": "schemas/events/inventory_updated.schema.json"
+      },
+      "shipment_created": {
+        "eventhub_name": "retail-shipments-events",
+        "schema_file": "schemas/events/shipment_created.schema.json"
+      },
+      "supplier_performance": {
+        "eventhub_name": "retail-supplier-performance-events",
+        "schema_file": "schemas/events/supplier_performance.schema.json"
+      }
+    },
+    "consumer_groups": {
+      "order_created": "cg-databricks-orders",
+      "inventory_updated": "cg-databricks-inventory",
+      "shipment_created": "cg-databricks-shipments",
+      "supplier_performance": "cg-databricks-supplier-performance"
+    }
+  },
   "master_data": {
     "suppliers": "master/suppliers/",
     "products": "master/products/",
     "warehouses": "master/warehouses/",
     "stores": "master/stores/",
     "customers": "master/customers/"
+  },
+    "secrets": {
+    "scope": "retail-digital-twin-dev",
+    "keys": {
+      "eventhub_consumer_connection_string": "eventhub-retail-consumer-connection-string"
+    }
   }
 }
