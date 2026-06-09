@@ -6,3 +6,4 @@ azure-eventhub==5.13.0
 python-dotenv==1.0.1
 PyYAML==6.0.2
 azure-identity>=1.17.1
+pytest>=8.3.0
