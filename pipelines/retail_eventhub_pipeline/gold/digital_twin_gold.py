@@ -35,6 +35,9 @@ GOLD_SUPPLIER_RISK_SCORE_TABLE = f"{catalog_name}.{gold_schema}.supplier_risk_sc
 GOLD_SHIPMENT_DELAY_IMPACT_TABLE = f"{catalog_name}.{gold_schema}.shipment_delay_impact"
 GOLD_PRODUCT_DEMAND_SUMMARY_TABLE = f"{catalog_name}.{gold_schema}.product_demand_summary"
 GOLD_STORE_SALES_SUMMARY_TABLE = f"{catalog_name}.{gold_schema}.store_sales_summary"
+GOLD_WAREHOUSE_STORE_REPLENISHMENT_TABLE = (
+    f"{catalog_name}.{gold_schema}.warehouse_store_replenishment_view"
+)
 
 GOLD_DIGITAL_TWIN_ENTITY_HEALTH_TABLE = (
     f"{catalog_name}.{gold_schema}.digital_twin_entity_health"
@@ -60,6 +63,7 @@ def digital_twin_entity_health():
     shipment_delay_df = spark.read.table(GOLD_SHIPMENT_DELAY_IMPACT_TABLE)
     product_demand_df = spark.read.table(GOLD_PRODUCT_DEMAND_SUMMARY_TABLE)
     store_sales_df = spark.read.table(GOLD_STORE_SALES_SUMMARY_TABLE)
+    warehouse_store_replenishment_df = spark.read.table(GOLD_WAREHOUSE_STORE_REPLENISHMENT_TABLE)
 
     # ---------------------------------------------------------------------
     # Product health
@@ -214,36 +218,40 @@ def digital_twin_entity_health():
     # ---------------------------------------------------------------------
     # Store health
     # ---------------------------------------------------------------------
-    store_stockout_summary_df = (
-        stockout_risk_df
-        .filter(col("location_type") == "store")
-        .groupBy(col("location_id").alias("store_id"))
-        .agg(
-            spark_sum(
-                when(col("stockout_risk_band") == "high", lit(1)).otherwise(lit(0))
-            ).alias("high_stockout_location_count"),
-            spark_sum(
-                when(col("stockout_risk_band") == "medium", lit(1)).otherwise(lit(0))
-            ).alias("medium_stockout_location_count"),
-            spark_sum("stock_on_hand_after").alias("total_stock_on_hand"),
-            spark_sum("available_stock").alias("total_available_stock"),
-        )
-    )
-
-    store_sales_summary_df = (
-        store_sales_df
+    
+    store_replenishment_summary_df = (
+        warehouse_store_replenishment_df
         .groupBy("store_id")
         .agg(
-            spark_sum("total_revenue").alias("total_revenue"),
-            spark_sum("total_items_sold").alias("total_quantity_sold"),
-            spark_max("latest_order_timestamp").alias("latest_order_timestamp"),
+            spark_sum(
+                when(col("replenishment_priority") == "urgent", lit(1)).otherwise(lit(0))
+            ).alias("urgent_replenishment_count"),
+            spark_sum(
+                when(col("replenishment_priority") == "planned", lit(1)).otherwise(lit(0))
+            ).alias("planned_replenishment_count"),
+            spark_sum(
+                when(col("replenishment_priority") == "monitor_delay", lit(1)).otherwise(lit(0))
+            ).alias("delay_monitoring_count"),
+            spark_sum(
+                when(col("high_impact_inbound_delay_count") > 0, lit(1)).otherwise(lit(0))
+            ).alias("high_impact_inbound_delay_count"),
+            spark_sum("stock_on_hand_after").alias("total_stock_on_hand"),
+            spark_sum("available_stock").alias("total_available_stock"),
+            spark_sum("store_total_revenue").alias("total_revenue"),
+            spark_sum("store_total_items_sold").alias("total_quantity_sold"),
+            spark_max("store_latest_order_timestamp").alias("latest_order_timestamp"),
+            spark_max("latest_inventory_event_timestamp").alias(
+                "latest_inventory_event_timestamp"
+            ),
+            spark_max("latest_inbound_shipment_event_timestamp").alias(
+                "latest_inbound_shipment_event_timestamp"
+            ),
         )
     )
 
     store_health_df = (
         stores_df.alias("s")
-        .join(store_stockout_summary_df.alias("stock"), "store_id", "left")
-        .join(store_sales_summary_df.alias("sales"), "store_id", "left")
+        .join(store_replenishment_summary_df.alias("rep"), "store_id", "left")
         .select(
             lit("store").alias("entity_type"),
             col("s.store_id").alias("entity_id"),
@@ -251,19 +259,20 @@ def digital_twin_entity_health():
             col("s.store_type").alias("entity_category"),
             col("s.warehouse_id").alias("related_entity_id"),
             lit(True).alias("is_active"),
-            col("stock.total_stock_on_hand"),
-            col("stock.total_available_stock"),
-            col("stock.high_stockout_location_count"),
-            col("stock.medium_stockout_location_count"),
-            lit(None).cast("long").alias("delayed_shipment_count"),
-            lit(None).cast("long").alias("high_impact_delay_count"),
-            col("sales.total_quantity_sold"),
-            col("sales.total_revenue"),
+            col("rep.total_stock_on_hand"),
+            col("rep.total_available_stock"),
+            col("rep.urgent_replenishment_count").alias("high_stockout_location_count"),
+            col("rep.planned_replenishment_count").alias("medium_stockout_location_count"),
+            col("rep.delay_monitoring_count").alias("delayed_shipment_count"),
+            col("rep.high_impact_inbound_delay_count"),
+            col("rep.total_quantity_sold"),
+            col("rep.total_revenue"),
             lit(None).cast("string").alias("demand_band"),
         )
         .withColumn(
             "health_score",
-            when(col("high_stockout_location_count") > 0, lit(45))
+            when(col("high_stockout_location_count") > 0, lit(40))
+            .when(col("high_impact_inbound_delay_count") > 0, lit(55))
             .when(col("medium_stockout_location_count") > 0, lit(70))
             .otherwise(lit(90)),
         )
@@ -275,8 +284,18 @@ def digital_twin_entity_health():
         )
         .withColumn(
             "main_risk_reason",
-            when(col("high_stockout_location_count") > 0, lit("store_stockout_risk"))
-            .when(col("medium_stockout_location_count") > 0, lit("store_reorder_risk"))
+            when(
+                col("high_stockout_location_count") > 0,
+                lit("urgent_replenishment_required"),
+            )
+            .when(
+                col("high_impact_inbound_delay_count") > 0,
+                lit("inbound_shipment_delay"),
+            )
+            .when(
+                col("medium_stockout_location_count") > 0,
+                lit("planned_replenishment_required"),
+            )
             .otherwise(lit("healthy")),
         )
     )
@@ -284,44 +303,42 @@ def digital_twin_entity_health():
     # ---------------------------------------------------------------------
     # Warehouse health
     # ---------------------------------------------------------------------
-    warehouse_stockout_summary_df = (
-        stockout_risk_df
-        .filter(col("location_type") == "warehouse")
-        .groupBy(col("location_id").alias("warehouse_id"))
+        # ---------------------------------------------------------------------
+    # Warehouse health
+    # ---------------------------------------------------------------------
+    warehouse_replenishment_summary_df = (
+        warehouse_store_replenishment_df
+        .groupBy("serving_warehouse_id")
         .agg(
             spark_sum(
-                when(col("stockout_risk_band") == "high", lit(1)).otherwise(lit(0))
-            ).alias("high_stockout_location_count"),
+                when(col("replenishment_priority") == "urgent", lit(1)).otherwise(lit(0))
+            ).alias("served_store_urgent_replenishment_count"),
             spark_sum(
-                when(col("stockout_risk_band") == "medium", lit(1)).otherwise(lit(0))
-            ).alias("medium_stockout_location_count"),
+                when(col("replenishment_priority") == "planned", lit(1)).otherwise(lit(0))
+            ).alias("served_store_planned_replenishment_count"),
+            spark_sum(
+                when(
+                    col("warehouse_action")
+                    == "rebalance_or_expedite_from_alternate_warehouse",
+                    lit(1),
+                ).otherwise(lit(0))
+            ).alias("warehouse_capacity_pressure_count"),
+            spark_sum(
+                when(col("high_impact_inbound_delay_count") > 0, lit(1)).otherwise(lit(0))
+            ).alias("high_impact_store_delay_count"),
             spark_sum("stock_on_hand_after").alias("total_stock_on_hand"),
             spark_sum("available_stock").alias("total_available_stock"),
-        )
-    )
-
-    warehouse_delay_summary_df = (
-        shipment_delay_df
-        .filter((col("source_type") == "warehouse") | (col("destination_type") == "warehouse"))
-        .groupBy(
-            when(col("source_type") == "warehouse", col("source_id"))
-            .otherwise(col("destination_id"))
-            .alias("warehouse_id")
-        )
-        .agg(
-            spark_sum(when(col("is_delayed") == True, lit(1)).otherwise(lit(0))).alias(
-                "delayed_shipment_count"
-            ),
-            spark_sum(
-                when(col("impact_band").isin("critical", "high"), lit(1)).otherwise(lit(0))
-            ).alias("high_impact_delay_count"),
+            count("store_id").alias("store_product_replenishment_signal_count"),
         )
     )
 
     warehouse_health_df = (
         warehouses_df.alias("w")
-        .join(warehouse_stockout_summary_df.alias("stock"), "warehouse_id", "left")
-        .join(warehouse_delay_summary_df.alias("delay"), "warehouse_id", "left")
+        .join(
+            warehouse_replenishment_summary_df.alias("rep"),
+            col("w.warehouse_id") == col("rep.serving_warehouse_id"),
+            "left",
+        )
         .select(
             lit("warehouse").alias("entity_type"),
             col("w.warehouse_id").alias("entity_id"),
@@ -329,19 +346,25 @@ def digital_twin_entity_health():
             col("w.utilization_band").alias("entity_category"),
             lit(None).cast("string").alias("related_entity_id"),
             lit(True).alias("is_active"),
-            col("stock.total_stock_on_hand"),
-            col("stock.total_available_stock"),
-            col("stock.high_stockout_location_count"),
-            col("stock.medium_stockout_location_count"),
-            col("delay.delayed_shipment_count"),
-            col("delay.high_impact_delay_count"),
+            col("rep.total_stock_on_hand"),
+            col("rep.total_available_stock"),
+            col("rep.served_store_urgent_replenishment_count").alias(
+                "high_stockout_location_count"
+            ),
+            col("rep.served_store_planned_replenishment_count").alias(
+                "medium_stockout_location_count"
+            ),
+            col("rep.high_impact_store_delay_count").alias("delayed_shipment_count"),
+            col("rep.warehouse_capacity_pressure_count").alias(
+                "high_impact_delay_count"
+            ),
             lit(None).cast("long").alias("total_quantity_sold"),
             lit(None).cast("double").alias("total_revenue"),
             lit(None).cast("string").alias("demand_band"),
         )
         .withColumn(
             "health_score",
-            when(col("high_impact_delay_count") > 0, lit(50))
+            when(col("high_impact_delay_count") > 0, lit(45))
             .when(col("high_stockout_location_count") > 0, lit(55))
             .when(col("medium_stockout_location_count") > 0, lit(75))
             .otherwise(lit(90)),
@@ -354,13 +377,22 @@ def digital_twin_entity_health():
         )
         .withColumn(
             "main_risk_reason",
-            when(col("high_impact_delay_count") > 0, lit("warehouse_shipment_delay"))
-            .when(col("high_stockout_location_count") > 0, lit("warehouse_stockout_risk"))
-            .when(col("medium_stockout_location_count") > 0, lit("warehouse_reorder_risk"))
+            when(
+                col("high_impact_delay_count") > 0,
+                lit("warehouse_capacity_pressure"),
+            )
+            .when(
+                col("high_stockout_location_count") > 0,
+                lit("served_store_urgent_replenishment"),
+            )
+            .when(
+                col("medium_stockout_location_count") > 0,
+                lit("served_store_planned_replenishment"),
+            )
             .otherwise(lit("healthy")),
         )
     )
-
+    
     return (
         product_health_df
         .unionByName(supplier_health_df, allowMissingColumns=True)
