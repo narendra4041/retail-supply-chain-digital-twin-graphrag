@@ -118,6 +118,77 @@ def normalize_warehouse_columns(df: DataFrame) -> DataFrame:
     return result_df
 
 
+def add_alias_if_present(
+    df: DataFrame,
+    source_column: str,
+    target_column: str,
+) -> DataFrame:
+    """Create target_column from source_column when target_column is missing."""
+    if source_column in df.columns and target_column not in df.columns:
+        return df.withColumn(target_column, F.col(source_column))
+    return df
+
+
+def normalize_supplier_master_columns(df: DataFrame) -> DataFrame:
+    # silver.suppliers uses country / region.
+    # Neo4j Supplier keeps these as country / region.
+    result_df = add_alias_if_present(df, "supplier_country", "country")
+    result_df = add_alias_if_present(result_df, "supplier_region", "region")
+    return result_df
+
+
+def normalize_store_master_columns(df: DataFrame) -> DataFrame:
+    # silver.stores usually uses generic location columns:
+    # country / city / region.
+    # Neo4j Store properties use store_country / store_city / store_region
+    # to avoid ambiguity when nodes are viewed together.
+    result_df = add_alias_if_present(df, "country", "store_country")
+    result_df = add_alias_if_present(result_df, "city", "store_city")
+    result_df = add_alias_if_present(result_df, "region", "store_region")
+    return result_df
+
+
+def normalize_warehouse_master_columns(df: DataFrame) -> DataFrame:
+    # silver.warehouses usually uses generic location columns:
+    # country / city / region.
+    # Neo4j Warehouse properties use warehouse_country / warehouse_city / warehouse_region.
+    result_df = add_alias_if_present(df, "country", "warehouse_country")
+    result_df = add_alias_if_present(result_df, "city", "warehouse_city")
+    result_df = add_alias_if_present(result_df, "region", "warehouse_region")
+    return result_df
+
+
+def normalize_product_master_columns(df: DataFrame) -> DataFrame:
+    # Keep compatibility with common alternative naming patterns.
+    result_df = add_alias_if_present(df, "subcategory", "sub_category")
+    result_df = add_alias_if_present(result_df, "product_category", "category")
+    result_df = add_alias_if_present(result_df, "product_sub_category", "sub_category")
+    return result_df
+
+
+def normalize_customer_master_columns(df: DataFrame) -> DataFrame:
+    # If customer_name is not present, we build it later from first_name + last_name.
+    return df
+
+
+def normalize_supplier_risk_columns(df: DataFrame) -> DataFrame:
+    # Gold supplier_risk_score should use risk_band, but support supplier_risk_band too.
+    result_df = add_alias_if_present(df, "supplier_risk_band", "risk_band")
+    result_df = add_alias_if_present(result_df, "supplier_risk_score", "computed_supplier_risk_score")
+    return result_df
+
+
+def normalize_stockout_columns(df: DataFrame) -> DataFrame:
+    # Some versions may expose store_id / warehouse_id instead of location_id.
+    result_df = df
+    if "location_id" not in result_df.columns:
+        if "store_id" in result_df.columns:
+            result_df = result_df.withColumn("location_id", F.col("store_id"))
+        elif "warehouse_id" in result_df.columns:
+            result_df = result_df.withColumn("location_id", F.col("warehouse_id"))
+    return result_df
+
+
 def sanitize_value(value: Any) -> Any:
     if value is None:
         return None
@@ -173,11 +244,11 @@ def write_df_to_neo4j(
 # Silver master/entity tables.
 # These are the base source of truth for Neo4j nodes.
 
-suppliers_master_df = read_silver_table("suppliers")
-products_master_df = read_silver_table("products")
-warehouses_master_df = read_silver_table("warehouses")
-stores_master_df = read_silver_table("stores")
-customers_master_df = read_silver_table("customers")
+suppliers_master_df = normalize_supplier_master_columns(read_silver_table("suppliers"))
+products_master_df = normalize_product_master_columns(read_silver_table("products"))
+warehouses_master_df = normalize_warehouse_master_columns(read_silver_table("warehouses"))
+stores_master_df = normalize_store_master_columns(read_silver_table("stores"))
+customers_master_df = normalize_customer_master_columns(read_silver_table("customers"))
 
 # Silver transactional table for shipment base entities.
 shipments_silver_df = read_silver_table("shipments")
@@ -188,9 +259,9 @@ shipments_silver_df = read_silver_table("shipments")
 # These provide metrics, risks, dependencies, and business relationships.
 
 supplier_product_dependency_df = read_gold_table("supplier_product_dependency")
-supplier_risk_score_df = read_gold_table("supplier_risk_score")
+supplier_risk_score_df = normalize_supplier_risk_columns(read_gold_table("supplier_risk_score"))
 product_demand_summary_df = read_gold_table("product_demand_summary")
-stockout_risk_df = read_gold_table("stockout_risk")
+stockout_risk_df = normalize_stockout_columns(read_gold_table("stockout_risk"))
 warehouse_store_replenishment_df = normalize_warehouse_columns(
     read_gold_table("warehouse_store_replenishment_view")
 )
@@ -198,6 +269,32 @@ shipment_delay_impact_df = read_gold_table("shipment_delay_impact")
 digital_twin_entity_health_df = read_gold_table("digital_twin_entity_health")
 customer_order_summary_df = read_gold_table("customer_order_summary")
 store_sales_summary_df = read_gold_table("store_sales_summary")
+
+# COMMAND ----------
+
+# Lightweight schema visibility.
+# This helps catch naming issues before the graph write starts.
+
+source_dataframes = {
+    "silver.suppliers": suppliers_master_df,
+    "silver.products": products_master_df,
+    "silver.warehouses": warehouses_master_df,
+    "silver.stores": stores_master_df,
+    "silver.customers": customers_master_df,
+    "silver.shipments": shipments_silver_df,
+    "gold.supplier_product_dependency": supplier_product_dependency_df,
+    "gold.supplier_risk_score": supplier_risk_score_df,
+    "gold.product_demand_summary": product_demand_summary_df,
+    "gold.stockout_risk": stockout_risk_df,
+    "gold.warehouse_store_replenishment_view": warehouse_store_replenishment_df,
+    "gold.shipment_delay_impact": shipment_delay_impact_df,
+    "gold.digital_twin_entity_health": digital_twin_entity_health_df,
+    "gold.customer_order_summary": customer_order_summary_df,
+    "gold.store_sales_summary": store_sales_summary_df,
+}
+
+for source_name, source_df in source_dataframes.items():
+    print(f"{source_name}: {source_df.columns}")
 
 # COMMAND ----------
 
@@ -211,11 +308,10 @@ supplier_master_nodes_df = ensure_columns(
     [
         "supplier_id",
         "supplier_name",
-        "supplier_country",
-        "supplier_region",
+        "country",
+        "region",
         "supplier_type",
         "preferred_supplier_flag",
-        "active_flag",
     ],
 )
 
@@ -235,11 +331,10 @@ supplier_nodes_df = (
     .select(
         F.col("supplier_id"),
         F.col("s.supplier_name").alias("supplier_name"),
-        F.col("s.supplier_country").alias("supplier_country"),
-        F.col("s.supplier_region").alias("supplier_region"),
+        F.col("s.country").alias("country"),
+        F.col("s.region").alias("region"),
         F.col("s.supplier_type").alias("supplier_type"),
         F.col("s.preferred_supplier_flag").alias("preferred_supplier_flag"),
-        F.col("s.active_flag").alias("active_flag"),
         F.col("r.risk_band").alias("risk_band"),
         F.col("r.computed_supplier_risk_score").alias("computed_supplier_risk_score"),
         F.col("r.primary_risk_reason").alias("primary_risk_reason"),
@@ -257,11 +352,10 @@ UNWIND $rows AS row
 MERGE (s:Supplier {supplier_id: row.supplier_id})
 SET
     s.supplier_name = row.supplier_name,
-    s.supplier_country = row.supplier_country,
-    s.supplier_region = row.supplier_region,
+    s.country = row.country,
+    s.region = row.region,
     s.supplier_type = row.supplier_type,
     s.preferred_supplier_flag = row.preferred_supplier_flag,
-    s.active_flag = row.active_flag,
     s.risk_band = row.risk_band,
     s.computed_supplier_risk_score = row.computed_supplier_risk_score,
     s.primary_risk_reason = row.primary_risk_reason,
