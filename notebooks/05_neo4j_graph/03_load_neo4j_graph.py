@@ -126,6 +126,11 @@ supplier_product_dependency_df = read_gold_table("supplier_product_dependency")
 supplier_risk_score_df = read_gold_table("supplier_risk_score")
 product_demand_summary_df = read_gold_table("product_demand_summary")
 warehouse_store_replenishment_df = read_gold_table("warehouse_store_replenishment_view")
+warehouse_store_replenishment_df = (
+    warehouse_store_replenishment_df
+    .withColumnRenamed("serving_warehouse_id", "warehouse_id")
+    .withColumnRenamed("serving_warehouse_name", "warehouse_name")
+)
 shipment_delay_impact_df = read_gold_table("shipment_delay_impact")
 digital_twin_entity_health_df = read_gold_table("digital_twin_entity_health")
 
