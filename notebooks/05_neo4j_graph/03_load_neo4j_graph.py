@@ -5,7 +5,8 @@
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, List
+import math
 
 from neo4j import GraphDatabase
 from pyspark.sql import DataFrame
@@ -13,7 +14,20 @@ from pyspark.sql import functions as F
 
 # COMMAND ----------
 
+# This notebook performs a full-snapshot UPSERT load from Databricks to Neo4j.
+#
+# Production source pattern:
+# - Silver master tables are the source of truth for stable business entities.
+# - Gold views are used for metrics, risks, dependencies, and relationships.
+#
+# Important:
+# - This version is idempotent because it uses MERGE.
+# - This version is not incremental yet.
+# - This version does not soft-delete missing entities yet.
+# - Incremental load and soft delete will be added later as separate production enhancements.
+
 dbutils.widgets.text("catalog_name", "")
+dbutils.widgets.text("silver_schema", "")
 dbutils.widgets.text("gold_schema", "")
 dbutils.widgets.text("secret_scope", "")
 dbutils.widgets.text("batch_size", "500")
@@ -28,11 +42,13 @@ def get_required_widget(name: str) -> str:
 
 
 catalog_name = get_required_widget("catalog_name")
+silver_schema = get_required_widget("silver_schema")
 gold_schema = get_required_widget("gold_schema")
 secret_scope = get_required_widget("secret_scope")
 batch_size = int(get_required_widget("batch_size"))
 
 print(f"Catalog: {catalog_name}")
+print(f"Silver schema: {silver_schema}")
 print(f"Gold schema: {gold_schema}")
 print(f"Batch size: {batch_size}")
 
@@ -58,13 +74,23 @@ print("Neo4j connectivity verified.")
 
 # COMMAND ----------
 
-def table_name(table: str) -> str:
+def silver_table_name(table: str) -> str:
+    return f"{catalog_name}.{silver_schema}.{table}"
+
+
+def gold_table_name(table: str) -> str:
     return f"{catalog_name}.{gold_schema}.{table}"
 
 
+def read_silver_table(table: str) -> DataFrame:
+    full_name = silver_table_name(table)
+    print(f"Reading Silver table: {full_name}")
+    return spark.table(full_name)
+
+
 def read_gold_table(table: str) -> DataFrame:
-    full_name = table_name(table)
-    print(f"Reading {full_name}")
+    full_name = gold_table_name(table)
+    print(f"Reading Gold table: {full_name}")
     return spark.table(full_name)
 
 
@@ -76,7 +102,29 @@ def ensure_columns(df: DataFrame, required_columns: List[str]) -> DataFrame:
     return result_df.select(*required_columns)
 
 
+def rename_if_present(df: DataFrame, old_name: str, new_name: str) -> DataFrame:
+    if old_name in df.columns and new_name not in df.columns:
+        return df.withColumnRenamed(old_name, new_name)
+    return df
+
+
+def normalize_warehouse_columns(df: DataFrame) -> DataFrame:
+    # Gold view uses business-friendly names:
+    # serving_warehouse_id / serving_warehouse_name.
+    # Neo4j graph uses generic Warehouse properties:
+    # warehouse_id / warehouse_name.
+    result_df = rename_if_present(df, "serving_warehouse_id", "warehouse_id")
+    result_df = rename_if_present(result_df, "serving_warehouse_name", "warehouse_name")
+    return result_df
+
+
 def sanitize_value(value: Any) -> Any:
+    if value is None:
+        return None
+
+    if isinstance(value, float) and math.isnan(value):
+        return None
+
     if isinstance(value, Decimal):
         return float(value)
 
@@ -122,46 +170,82 @@ def write_df_to_neo4j(
 
 # COMMAND ----------
 
-supplier_product_dependency_df = read_gold_table("supplier_product_dependency")
-supplier_risk_score_df = read_gold_table("supplier_risk_score")
-product_demand_summary_df = read_gold_table("product_demand_summary")
-warehouse_store_replenishment_df = read_gold_table("warehouse_store_replenishment_view")
-warehouse_store_replenishment_df = (
-    warehouse_store_replenishment_df
-    .withColumnRenamed("serving_warehouse_id", "warehouse_id")
-    .withColumnRenamed("serving_warehouse_name", "warehouse_name")
-)
-shipment_delay_impact_df = read_gold_table("shipment_delay_impact")
-digital_twin_entity_health_df = read_gold_table("digital_twin_entity_health")
+# Silver master/entity tables.
+# These are the base source of truth for Neo4j nodes.
+
+suppliers_master_df = read_silver_table("suppliers")
+products_master_df = read_silver_table("products")
+warehouses_master_df = read_silver_table("warehouses")
+stores_master_df = read_silver_table("stores")
+customers_master_df = read_silver_table("customers")
+
+# Silver transactional table for shipment base entities.
+shipments_silver_df = read_silver_table("shipments")
 
 # COMMAND ----------
 
-supplier_nodes_df = (
-    supplier_product_dependency_df
-    .select(
-        "supplier_id",
-        "supplier_name",
-    )
-    .unionByName(
-        ensure_columns(
-            supplier_risk_score_df,
-            [
-                "supplier_id",
-                "supplier_name",
-            ],
-        ),
-        allowMissingColumns=True,
-    )
-    .dropna(subset=["supplier_id"])
-    .dropDuplicates(["supplier_id"])
-)
+# Gold analytics/risk/enrichment views.
+# These provide metrics, risks, dependencies, and business relationships.
 
-supplier_nodes_df = ensure_columns(
-    supplier_nodes_df,
+supplier_product_dependency_df = read_gold_table("supplier_product_dependency")
+supplier_risk_score_df = read_gold_table("supplier_risk_score")
+product_demand_summary_df = read_gold_table("product_demand_summary")
+stockout_risk_df = read_gold_table("stockout_risk")
+warehouse_store_replenishment_df = normalize_warehouse_columns(
+    read_gold_table("warehouse_store_replenishment_view")
+)
+shipment_delay_impact_df = read_gold_table("shipment_delay_impact")
+digital_twin_entity_health_df = read_gold_table("digital_twin_entity_health")
+customer_order_summary_df = read_gold_table("customer_order_summary")
+store_sales_summary_df = read_gold_table("store_sales_summary")
+
+# COMMAND ----------
+
+# Supplier nodes
+#
+# Base entity: silver.suppliers
+# Enrichment: gold.supplier_risk_score
+
+supplier_master_nodes_df = ensure_columns(
+    suppliers_master_df,
     [
         "supplier_id",
         "supplier_name",
+        "supplier_country",
+        "supplier_region",
+        "supplier_type",
+        "preferred_supplier_flag",
+        "active_flag",
     ],
+)
+
+supplier_risk_metrics_df = ensure_columns(
+    supplier_risk_score_df,
+    [
+        "supplier_id",
+        "risk_band",
+        "computed_supplier_risk_score",
+        "primary_risk_reason",
+    ],
+)
+
+supplier_nodes_df = (
+    supplier_master_nodes_df.alias("s")
+    .join(supplier_risk_metrics_df.alias("r"), on="supplier_id", how="left")
+    .select(
+        F.col("supplier_id"),
+        F.col("s.supplier_name").alias("supplier_name"),
+        F.col("s.supplier_country").alias("supplier_country"),
+        F.col("s.supplier_region").alias("supplier_region"),
+        F.col("s.supplier_type").alias("supplier_type"),
+        F.col("s.preferred_supplier_flag").alias("preferred_supplier_flag"),
+        F.col("s.active_flag").alias("active_flag"),
+        F.col("r.risk_band").alias("risk_band"),
+        F.col("r.computed_supplier_risk_score").alias("computed_supplier_risk_score"),
+        F.col("r.primary_risk_reason").alias("primary_risk_reason"),
+    )
+    .dropna(subset=["supplier_id"])
+    .dropDuplicates(["supplier_id"])
 )
 
 display(supplier_nodes_df.limit(10))
@@ -173,6 +257,14 @@ UNWIND $rows AS row
 MERGE (s:Supplier {supplier_id: row.supplier_id})
 SET
     s.supplier_name = row.supplier_name,
+    s.supplier_country = row.supplier_country,
+    s.supplier_region = row.supplier_region,
+    s.supplier_type = row.supplier_type,
+    s.preferred_supplier_flag = row.preferred_supplier_flag,
+    s.active_flag = row.active_flag,
+    s.risk_band = row.risk_band,
+    s.computed_supplier_risk_score = row.computed_supplier_risk_score,
+    s.primary_risk_reason = row.primary_risk_reason,
     s.updated_at = datetime()
 """
 
@@ -185,8 +277,15 @@ write_df_to_neo4j(
 
 # COMMAND ----------
 
-product_nodes_df = ensure_columns(
-    product_demand_summary_df,
+# Product nodes
+#
+# Base entity: silver.products
+# Enrichment:
+# - gold.product_demand_summary
+# - gold.stockout_risk
+
+product_master_nodes_df = ensure_columns(
+    products_master_df,
     [
         "product_id",
         "product_name",
@@ -194,12 +293,89 @@ product_nodes_df = ensure_columns(
         "sub_category",
         "brand",
         "supplier_id",
+        "unit_price",
+        "unit_cost",
+        "gross_margin",
+        "gross_margin_pct",
+        "active_flag",
+    ],
+)
+
+product_demand_metrics_df = ensure_columns(
+    product_demand_summary_df,
+    [
+        "product_id",
         "demand_band",
         "total_quantity_sold",
         "total_revenue",
-        "active_flag",
     ],
-).dropna(subset=["product_id"]).dropDuplicates(["product_id"])
+).dropDuplicates(["product_id"])
+
+stockout_base_df = ensure_columns(
+    stockout_risk_df,
+    [
+        "product_id",
+        "location_id",
+        "stockout_risk_band",
+        "inventory_status",
+        "recommended_action",
+    ],
+).filter(F.col("product_id").isNotNull())
+
+stockout_metrics_df = (
+    stockout_base_df
+    .withColumn(
+        "stockout_severity_score",
+        F.when(F.lower(F.col("stockout_risk_band")).isin("critical", "high"), F.lit(3))
+        .when(F.lower(F.col("stockout_risk_band")) == "medium", F.lit(2))
+        .when(F.lower(F.col("stockout_risk_band")) == "low", F.lit(1))
+        .otherwise(F.lit(0)),
+    )
+    .groupBy("product_id")
+    .agg(
+        F.countDistinct("location_id").alias("stockout_location_count"),
+        F.sum(F.when(F.lower(F.col("stockout_risk_band")).isin("critical", "high"), 1).otherwise(0)).alias("high_stockout_location_count"),
+        F.max("stockout_severity_score").alias("max_stockout_severity_score"),
+        F.first("inventory_status", ignorenulls=True).alias("sample_inventory_status"),
+        F.first("recommended_action", ignorenulls=True).alias("sample_stockout_action"),
+    )
+    .withColumn(
+        "highest_stockout_risk_band",
+        F.when(F.col("max_stockout_severity_score") == 3, F.lit("high"))
+        .when(F.col("max_stockout_severity_score") == 2, F.lit("medium"))
+        .when(F.col("max_stockout_severity_score") == 1, F.lit("low"))
+        .otherwise(F.lit(None)),
+    )
+)
+
+product_nodes_df = (
+    product_master_nodes_df.alias("p")
+    .join(product_demand_metrics_df.alias("d"), on="product_id", how="left")
+    .join(stockout_metrics_df.alias("sr"), on="product_id", how="left")
+    .select(
+        F.col("product_id"),
+        F.col("p.product_name").alias("product_name"),
+        F.col("p.category").alias("category"),
+        F.col("p.sub_category").alias("sub_category"),
+        F.col("p.brand").alias("brand"),
+        F.col("p.supplier_id").alias("supplier_id"),
+        F.col("p.unit_price").alias("unit_price"),
+        F.col("p.unit_cost").alias("unit_cost"),
+        F.col("p.gross_margin").alias("gross_margin"),
+        F.col("p.gross_margin_pct").alias("gross_margin_pct"),
+        F.col("p.active_flag").alias("active_flag"),
+        F.col("d.demand_band").alias("demand_band"),
+        F.col("d.total_quantity_sold").alias("total_quantity_sold"),
+        F.col("d.total_revenue").alias("total_revenue"),
+        F.col("sr.stockout_location_count").alias("stockout_location_count"),
+        F.col("sr.high_stockout_location_count").alias("high_stockout_location_count"),
+        F.col("sr.highest_stockout_risk_band").alias("highest_stockout_risk_band"),
+        F.col("sr.sample_inventory_status").alias("sample_inventory_status"),
+        F.col("sr.sample_stockout_action").alias("sample_stockout_action"),
+    )
+    .dropna(subset=["product_id"])
+    .dropDuplicates(["product_id"])
+)
 
 display(product_nodes_df.limit(10))
 
@@ -214,10 +390,19 @@ SET
     p.sub_category = row.sub_category,
     p.brand = row.brand,
     p.supplier_id = row.supplier_id,
+    p.unit_price = row.unit_price,
+    p.unit_cost = row.unit_cost,
+    p.gross_margin = row.gross_margin,
+    p.gross_margin_pct = row.gross_margin_pct,
+    p.active_flag = row.active_flag,
     p.demand_band = row.demand_band,
     p.total_quantity_sold = row.total_quantity_sold,
     p.total_revenue = row.total_revenue,
-    p.active_flag = row.active_flag,
+    p.stockout_location_count = row.stockout_location_count,
+    p.high_stockout_location_count = row.high_stockout_location_count,
+    p.highest_stockout_risk_band = row.highest_stockout_risk_band,
+    p.sample_inventory_status = row.sample_inventory_status,
+    p.sample_stockout_action = row.sample_stockout_action,
     p.updated_at = datetime()
 """
 
@@ -230,16 +415,76 @@ write_df_to_neo4j(
 
 # COMMAND ----------
 
-store_nodes_df = ensure_columns(
-    warehouse_store_replenishment_df,
+# Store nodes
+#
+# Base entity: silver.stores
+# Enrichment:
+# - gold.store_sales_summary
+# - gold.customer_order_summary
+
+store_master_nodes_df = ensure_columns(
+    stores_master_df,
     [
         "store_id",
         "store_name",
         "store_country",
         "store_city",
         "store_region",
+        "store_type",
+        "store_size_band",
+        "active_flag",
     ],
-).dropna(subset=["store_id"]).dropDuplicates(["store_id"])
+)
+
+store_sales_metrics_df = ensure_columns(
+    store_sales_summary_df,
+    [
+        "store_id",
+        "total_revenue",
+        "total_quantity_sold",
+        "order_count",
+    ],
+).dropDuplicates(["store_id"])
+
+customer_store_metrics_df = (
+    ensure_columns(
+        customer_order_summary_df,
+        [
+            "store_id",
+            "customer_id",
+            "total_spend",
+        ],
+    )
+    .filter(F.col("store_id").isNotNull())
+    .groupBy("store_id")
+    .agg(
+        F.countDistinct("customer_id").alias("customer_count"),
+        F.sum("total_spend").alias("customer_total_spend"),
+    )
+)
+
+store_nodes_df = (
+    store_master_nodes_df.alias("s")
+    .join(store_sales_metrics_df.alias("ss"), on="store_id", how="left")
+    .join(customer_store_metrics_df.alias("cm"), on="store_id", how="left")
+    .select(
+        F.col("store_id"),
+        F.col("s.store_name").alias("store_name"),
+        F.col("s.store_country").alias("store_country"),
+        F.col("s.store_city").alias("store_city"),
+        F.col("s.store_region").alias("store_region"),
+        F.col("s.store_type").alias("store_type"),
+        F.col("s.store_size_band").alias("store_size_band"),
+        F.col("s.active_flag").alias("active_flag"),
+        F.col("ss.total_revenue").alias("total_revenue"),
+        F.col("ss.total_quantity_sold").alias("total_quantity_sold"),
+        F.col("ss.order_count").alias("order_count"),
+        F.col("cm.customer_count").alias("customer_count"),
+        F.col("cm.customer_total_spend").alias("customer_total_spend"),
+    )
+    .dropna(subset=["store_id"])
+    .dropDuplicates(["store_id"])
+)
 
 display(store_nodes_df.limit(10))
 
@@ -253,6 +498,14 @@ SET
     s.store_country = row.store_country,
     s.store_city = row.store_city,
     s.store_region = row.store_region,
+    s.store_type = row.store_type,
+    s.store_size_band = row.store_size_band,
+    s.active_flag = row.active_flag,
+    s.total_revenue = row.total_revenue,
+    s.total_quantity_sold = row.total_quantity_sold,
+    s.order_count = row.order_count,
+    s.customer_count = row.customer_count,
+    s.customer_total_spend = row.customer_total_spend,
     s.updated_at = datetime()
 """
 
@@ -265,18 +518,62 @@ write_df_to_neo4j(
 
 # COMMAND ----------
 
-warehouse_nodes_df = ensure_columns(
-    warehouse_store_replenishment_df,
+# Warehouse nodes
+#
+# Base entity: silver.warehouses
+# Enrichment:
+# - gold.warehouse_store_replenishment_view
+
+warehouse_master_nodes_df = ensure_columns(
+    warehouses_master_df,
     [
         "warehouse_id",
         "warehouse_name",
         "warehouse_country",
         "warehouse_city",
         "warehouse_region",
-        "warehouse_utilization_pct",
-        "warehouse_utilization_band",
+        "capacity_units",
+        "active_flag",
     ],
-).dropna(subset=["warehouse_id"]).dropDuplicates(["warehouse_id"])
+)
+
+warehouse_enrichment_df = (
+    ensure_columns(
+        warehouse_store_replenishment_df,
+        [
+            "warehouse_id",
+            "warehouse_utilization_pct",
+            "warehouse_utilization_band",
+            "store_id",
+        ],
+    )
+    .filter(F.col("warehouse_id").isNotNull())
+    .groupBy("warehouse_id")
+    .agg(
+        F.max("warehouse_utilization_pct").alias("warehouse_utilization_pct"),
+        F.first("warehouse_utilization_band", ignorenulls=True).alias("warehouse_utilization_band"),
+        F.countDistinct("store_id").alias("served_store_count"),
+    )
+)
+
+warehouse_nodes_df = (
+    warehouse_master_nodes_df.alias("w")
+    .join(warehouse_enrichment_df.alias("e"), on="warehouse_id", how="left")
+    .select(
+        F.col("warehouse_id"),
+        F.col("w.warehouse_name").alias("warehouse_name"),
+        F.col("w.warehouse_country").alias("warehouse_country"),
+        F.col("w.warehouse_city").alias("warehouse_city"),
+        F.col("w.warehouse_region").alias("warehouse_region"),
+        F.col("w.capacity_units").alias("capacity_units"),
+        F.col("w.active_flag").alias("active_flag"),
+        F.col("e.warehouse_utilization_pct").alias("warehouse_utilization_pct"),
+        F.col("e.warehouse_utilization_band").alias("warehouse_utilization_band"),
+        F.col("e.served_store_count").alias("served_store_count"),
+    )
+    .dropna(subset=["warehouse_id"])
+    .dropDuplicates(["warehouse_id"])
+)
 
 display(warehouse_nodes_df.limit(10))
 
@@ -290,8 +587,11 @@ SET
     w.warehouse_country = row.warehouse_country,
     w.warehouse_city = row.warehouse_city,
     w.warehouse_region = row.warehouse_region,
+    w.capacity_units = row.capacity_units,
+    w.active_flag = row.active_flag,
     w.warehouse_utilization_pct = row.warehouse_utilization_pct,
     w.warehouse_utilization_band = row.warehouse_utilization_band,
+    w.served_store_count = row.served_store_count,
     w.updated_at = datetime()
 """
 
@@ -304,13 +604,117 @@ write_df_to_neo4j(
 
 # COMMAND ----------
 
-shipment_nodes_df = ensure_columns(
-    shipment_delay_impact_df,
+# Customer nodes
+#
+# Base entity: silver.customers
+# Enrichment:
+# - gold.customer_order_summary
+
+customer_master_nodes_df = ensure_columns(
+    customers_master_df,
+    [
+        "customer_id",
+        "customer_name",
+        "first_name",
+        "last_name",
+        "country",
+        "city",
+        "customer_segment",
+        "loyalty_tier",
+        "active_flag",
+    ],
+)
+
+customer_order_metrics_df = ensure_columns(
+    customer_order_summary_df,
+    [
+        "customer_id",
+        "order_count",
+        "total_spend",
+        "customer_value_band",
+    ],
+).dropDuplicates(["customer_id"])
+
+customer_nodes_df = (
+    customer_master_nodes_df.alias("c")
+    .join(customer_order_metrics_df.alias("o"), on="customer_id", how="left")
+    .select(
+        F.col("customer_id"),
+        F.coalesce(
+            F.col("c.customer_name"),
+            F.concat_ws(" ", F.col("c.first_name"), F.col("c.last_name")),
+            F.col("customer_id"),
+        ).alias("customer_name"),
+        F.col("c.country").alias("country"),
+        F.col("c.city").alias("city"),
+        F.col("c.customer_segment").alias("customer_segment"),
+        F.col("c.loyalty_tier").alias("loyalty_tier"),
+        F.col("c.active_flag").alias("active_flag"),
+        F.col("o.order_count").alias("order_count"),
+        F.col("o.total_spend").alias("total_spend"),
+        F.col("o.customer_value_band").alias("customer_value_band"),
+    )
+    .dropna(subset=["customer_id"])
+    .dropDuplicates(["customer_id"])
+)
+
+display(customer_nodes_df.limit(10))
+
+# COMMAND ----------
+
+customer_node_cypher = """
+UNWIND $rows AS row
+MERGE (c:Customer {customer_id: row.customer_id})
+SET
+    c.customer_name = row.customer_name,
+    c.country = row.country,
+    c.city = row.city,
+    c.customer_segment = row.customer_segment,
+    c.loyalty_tier = row.loyalty_tier,
+    c.active_flag = row.active_flag,
+    c.order_count = row.order_count,
+    c.total_spend = row.total_spend,
+    c.customer_value_band = row.customer_value_band,
+    c.updated_at = datetime()
+"""
+
+write_df_to_neo4j(
+    customer_nodes_df,
+    customer_node_cypher,
+    "Customer nodes",
+    batch_size,
+)
+
+# COMMAND ----------
+
+# Shipment nodes
+#
+# Base entity: silver.shipments
+# Enrichment:
+# - gold.shipment_delay_impact
+
+shipment_master_nodes_df = ensure_columns(
+    shipments_silver_df,
     [
         "shipment_id",
+        "order_id",
+        "product_id",
         "shipment_type",
         "shipment_status",
         "carrier",
+        "source_type",
+        "source_id",
+        "destination_type",
+        "destination_id",
+        "quantity",
+    ],
+)
+
+shipment_delay_metrics_df = ensure_columns(
+    shipment_delay_impact_df,
+    [
+        "shipment_id",
+        "is_delayed",
         "delay_days",
         "delay_severity",
         "impact_band",
@@ -318,7 +722,34 @@ shipment_nodes_df = ensure_columns(
         "estimated_shipment_retail_value",
         "estimated_shipment_cost_value",
     ],
-).dropna(subset=["shipment_id"]).dropDuplicates(["shipment_id"])
+).dropDuplicates(["shipment_id"])
+
+shipment_nodes_df = (
+    shipment_master_nodes_df.alias("s")
+    .join(shipment_delay_metrics_df.alias("d"), on="shipment_id", how="left")
+    .select(
+        F.col("shipment_id"),
+        F.col("s.order_id").alias("order_id"),
+        F.col("s.product_id").alias("product_id"),
+        F.col("s.shipment_type").alias("shipment_type"),
+        F.col("s.shipment_status").alias("shipment_status"),
+        F.col("s.carrier").alias("carrier"),
+        F.col("s.source_type").alias("source_type"),
+        F.col("s.source_id").alias("source_id"),
+        F.col("s.destination_type").alias("destination_type"),
+        F.col("s.destination_id").alias("destination_id"),
+        F.col("s.quantity").alias("quantity"),
+        F.col("d.is_delayed").alias("is_delayed"),
+        F.col("d.delay_days").alias("delay_days"),
+        F.col("d.delay_severity").alias("delay_severity"),
+        F.col("d.impact_band").alias("impact_band"),
+        F.col("d.recommended_action").alias("recommended_action"),
+        F.col("d.estimated_shipment_retail_value").alias("estimated_shipment_retail_value"),
+        F.col("d.estimated_shipment_cost_value").alias("estimated_shipment_cost_value"),
+    )
+    .dropna(subset=["shipment_id"])
+    .dropDuplicates(["shipment_id"])
+)
 
 display(shipment_nodes_df.limit(10))
 
@@ -328,9 +759,17 @@ shipment_node_cypher = """
 UNWIND $rows AS row
 MERGE (sh:Shipment {shipment_id: row.shipment_id})
 SET
+    sh.order_id = row.order_id,
+    sh.product_id = row.product_id,
     sh.shipment_type = row.shipment_type,
     sh.shipment_status = row.shipment_status,
     sh.carrier = row.carrier,
+    sh.source_type = row.source_type,
+    sh.source_id = row.source_id,
+    sh.destination_type = row.destination_type,
+    sh.destination_id = row.destination_id,
+    sh.quantity = row.quantity,
+    sh.is_delayed = row.is_delayed,
     sh.delay_days = row.delay_days,
     sh.delay_severity = row.delay_severity,
     sh.impact_band = row.impact_band,
@@ -348,6 +787,13 @@ write_df_to_neo4j(
 )
 
 # COMMAND ----------
+
+# SUPPLIES relationship
+#
+# Source: gold.supplier_product_dependency
+#
+# Pattern:
+# (:Supplier)-[:SUPPLIES]->(:Product)
 
 supplies_relationship_df = ensure_columns(
     supplier_product_dependency_df,
@@ -387,6 +833,13 @@ write_df_to_neo4j(
 
 # COMMAND ----------
 
+# SERVES relationship
+#
+# Source: gold.warehouse_store_replenishment_view
+#
+# Pattern:
+# (:Warehouse)-[:SERVES]->(:Store)
+
 serves_relationship_df = ensure_columns(
     warehouse_store_replenishment_df,
     [
@@ -422,6 +875,13 @@ write_df_to_neo4j(
 )
 
 # COMMAND ----------
+
+# STOCKS relationship
+#
+# Source: gold.warehouse_store_replenishment_view
+#
+# Pattern:
+# (:Store)-[:STOCKS]->(:Product)
 
 store_stocks_relationship_df = ensure_columns(
     warehouse_store_replenishment_df,
@@ -469,6 +929,13 @@ write_df_to_neo4j(
 
 # COMMAND ----------
 
+# MOVES relationship
+#
+# Source: gold.shipment_delay_impact
+#
+# Pattern:
+# (:Shipment)-[:MOVES]->(:Product)
+
 shipment_moves_relationship_df = ensure_columns(
     shipment_delay_impact_df,
     [
@@ -508,6 +975,11 @@ write_df_to_neo4j(
 )
 
 # COMMAND ----------
+
+# FROM_SUPPLIER relationship
+#
+# Pattern:
+# (:Shipment)-[:FROM_SUPPLIER]->(:Supplier)
 
 shipment_from_supplier_df = (
     ensure_columns(
@@ -553,6 +1025,11 @@ write_df_to_neo4j(
 
 # COMMAND ----------
 
+# FROM_WAREHOUSE relationship
+#
+# Pattern:
+# (:Shipment)-[:FROM_WAREHOUSE]->(:Warehouse)
+
 shipment_from_warehouse_df = (
     ensure_columns(
         shipment_delay_impact_df,
@@ -596,6 +1073,11 @@ write_df_to_neo4j(
 )
 
 # COMMAND ----------
+
+# TO_STORE relationship
+#
+# Pattern:
+# (:Shipment)-[:TO_STORE]->(:Store)
 
 shipment_to_store_df = (
     ensure_columns(
@@ -641,6 +1123,11 @@ write_df_to_neo4j(
 
 # COMMAND ----------
 
+# TO_WAREHOUSE relationship
+#
+# Pattern:
+# (:Shipment)-[:TO_WAREHOUSE]->(:Warehouse)
+
 shipment_to_warehouse_df = (
     ensure_columns(
         shipment_delay_impact_df,
@@ -684,6 +1171,13 @@ write_df_to_neo4j(
 )
 
 # COMMAND ----------
+
+# RiskSignal nodes
+#
+# Source: gold.digital_twin_entity_health
+#
+# Pattern:
+# (:RiskSignal {risk_signal_id: ...})
 
 entity_health_df = (
     ensure_columns(
@@ -749,6 +1243,8 @@ write_df_to_neo4j(
 
 # COMMAND ----------
 
+# Product HAS_HEALTH_STATUS relationship
+
 product_health_df = risk_signal_nodes_df.filter(F.col("entity_type_normalized") == "product")
 
 product_health_relationship_cypher = """
@@ -771,6 +1267,8 @@ write_df_to_neo4j(
 )
 
 # COMMAND ----------
+
+# Supplier HAS_HEALTH_STATUS relationship
 
 supplier_health_df = risk_signal_nodes_df.filter(F.col("entity_type_normalized") == "supplier")
 
@@ -795,6 +1293,8 @@ write_df_to_neo4j(
 
 # COMMAND ----------
 
+# Store HAS_HEALTH_STATUS relationship
+
 store_health_df = risk_signal_nodes_df.filter(F.col("entity_type_normalized") == "store")
 
 store_health_relationship_cypher = """
@@ -817,6 +1317,8 @@ write_df_to_neo4j(
 )
 
 # COMMAND ----------
+
+# Warehouse HAS_HEALTH_STATUS relationship
 
 warehouse_health_df = risk_signal_nodes_df.filter(F.col("entity_type_normalized") == "warehouse")
 
@@ -841,17 +1343,51 @@ write_df_to_neo4j(
 
 # COMMAND ----------
 
+# Customer HAS_HEALTH_STATUS relationship
+#
+# This will write zero rows if digital_twin_entity_health does not contain customer health signals.
+
+customer_health_df = risk_signal_nodes_df.filter(F.col("entity_type_normalized") == "customer")
+
+customer_health_relationship_cypher = """
+UNWIND $rows AS row
+MATCH (c:Customer {customer_id: row.entity_id})
+MATCH (r:RiskSignal {risk_signal_id: row.risk_signal_id})
+MERGE (c)-[rel:HAS_HEALTH_STATUS]->(r)
+SET
+    rel.health_score = row.health_score,
+    rel.risk_band = row.risk_band,
+    rel.main_risk_reason = row.main_risk_reason,
+    rel.updated_at = datetime()
+"""
+
+write_df_to_neo4j(
+    customer_health_df,
+    customer_health_relationship_cypher,
+    "Customer HAS_HEALTH_STATUS relationships",
+    batch_size,
+)
+
+# COMMAND ----------
+
+# Validation queries
+
 validation_queries = {
     "Supplier nodes": "MATCH (n:Supplier) RETURN count(n) AS count",
     "Product nodes": "MATCH (n:Product) RETURN count(n) AS count",
     "Store nodes": "MATCH (n:Store) RETURN count(n) AS count",
     "Warehouse nodes": "MATCH (n:Warehouse) RETURN count(n) AS count",
+    "Customer nodes": "MATCH (n:Customer) RETURN count(n) AS count",
     "Shipment nodes": "MATCH (n:Shipment) RETURN count(n) AS count",
     "RiskSignal nodes": "MATCH (n:RiskSignal) RETURN count(n) AS count",
     "SUPPLIES relationships": "MATCH (:Supplier)-[r:SUPPLIES]->(:Product) RETURN count(r) AS count",
     "SERVES relationships": "MATCH (:Warehouse)-[r:SERVES]->(:Store) RETURN count(r) AS count",
     "STOCKS relationships": "MATCH (:Store)-[r:STOCKS]->(:Product) RETURN count(r) AS count",
     "MOVES relationships": "MATCH (:Shipment)-[r:MOVES]->(:Product) RETURN count(r) AS count",
+    "FROM_SUPPLIER relationships": "MATCH (:Shipment)-[r:FROM_SUPPLIER]->(:Supplier) RETURN count(r) AS count",
+    "FROM_WAREHOUSE relationships": "MATCH (:Shipment)-[r:FROM_WAREHOUSE]->(:Warehouse) RETURN count(r) AS count",
+    "TO_STORE relationships": "MATCH (:Shipment)-[r:TO_STORE]->(:Store) RETURN count(r) AS count",
+    "TO_WAREHOUSE relationships": "MATCH (:Shipment)-[r:TO_WAREHOUSE]->(:Warehouse) RETURN count(r) AS count",
     "HAS_HEALTH_STATUS relationships": "MATCH ()-[r:HAS_HEALTH_STATUS]->(:RiskSignal) RETURN count(r) AS count",
 }
 
