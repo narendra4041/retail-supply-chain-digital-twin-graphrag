@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+   
 from pyspark import pipelines as dp
 from pyspark.sql.functions import (
     col,
@@ -20,17 +20,12 @@ from pyspark.sql.types import (
     StructType,
 )
 
-from pipelines.retail_eventhub_pipeline.utils.config import (
-    get_catalog_name,
-    get_schema_name,
-)
-
 
 ENVIRONMENT = spark.conf.get("ENVIRONMENT", "dev")
 
-catalog_name = get_catalog_name(ENVIRONMENT)
-bronze_schema = get_schema_name("bronze", ENVIRONMENT)
-silver_schema = get_schema_name("silver", ENVIRONMENT)
+catalog_name = spark.conf.get("CATALOG_NAME")
+bronze_schema = spark.conf.get("BRONZE_SCHEMA")
+silver_schema = spark.conf.get("SILVER_SCHEMA")
 
 BRONZE_ORDERS_TABLE = f"{catalog_name}.{bronze_schema}.orders_events_raw"
 SILVER_ORDERS_TABLE = f"{catalog_name}.{silver_schema}.orders"

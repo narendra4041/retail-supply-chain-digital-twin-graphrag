@@ -1,0 +1,52 @@
+resources:
+  jobs:
+    retail_eventhub_validation_job:
+      name: retail-eventhub-validation-${bundle.target}
+
+      tasks:
+        - task_key: run_eventhub_pipeline
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.retail_eventhub_pipeline.id}
+            full_refresh: false
+
+        - task_key: validate_bronze_events
+          depends_on:
+            - task_key: run_eventhub_pipeline
+          notebook_task:
+            notebook_path: ../notebooks/02_bronze_ingestion/02_validate_bronze_event_tables.py
+            
+            base_parameters:
+              environment: ${var.environment}
+              catalog_name: ${var.catalog_name}
+              bronze_schema: ${var.bronze_schema}
+              silver_schema: ${var.silver_schema}
+              gold_schema: ${var.gold_schema}
+              monitoring_schema: ${var.monitoring_schema}
+
+        - task_key: validate_silver_events
+          depends_on:
+            - task_key: validate_bronze_events
+          notebook_task:
+            notebook_path: ../notebooks/03_silver_transformation/03_validate_silver_event_tables.py
+
+            base_parameters:
+              environment: ${var.environment}
+              catalog_name: ${var.catalog_name}
+              bronze_schema: ${var.bronze_schema}
+              silver_schema: ${var.silver_schema}
+              gold_schema: ${var.gold_schema}
+              monitoring_schema: ${var.monitoring_schema}
+
+        - task_key: validate_gold_tables
+          depends_on:
+            - task_key: validate_silver_events
+          notebook_task:
+            notebook_path: ../notebooks/04_gold_analytics/01_validate_gold_tables.py
+            
+            base_parameters:
+              environment: ${var.environment}
+              catalog_name: ${var.catalog_name}
+              bronze_schema: ${var.bronze_schema}
+              silver_schema: ${var.silver_schema}
+              gold_schema: ${var.gold_schema}
+              monitoring_schema: ${var.monitoring_schema}

@@ -1,34 +1,60 @@
 from __future__ import annotations
 
-from src.common.config_loader import load_config
+
+def get_required_conf(key: str) -> str:
+    value = spark.conf.get(key, None)
+
+    if value is None or str(value).strip() == "":
+        raise ValueError(f"Required pipeline configuration is missing: {key}")
+
+    return value
 
 
-def get_pipeline_config(environment: str = "dev") -> dict:
-    return load_config(environment)
+def get_catalog_name() -> str:
+    return get_required_conf("CATALOG_NAME")
 
 
-def get_catalog_name(environment: str = "dev") -> str:
-    config = get_pipeline_config(environment)
-    return config["unity_catalog"]["catalog"]
-
-
-def get_schema_name(schema_key: str, environment: str = "dev") -> str:
-    config = get_pipeline_config(environment)
-    return config["unity_catalog"]["schemas"][schema_key]
-
-
-def get_eventhub_config(event_type: str, environment: str = "dev") -> dict:
-    config = get_pipeline_config(environment)
-
-    event_hubs = config["event_hubs"]
-    event_config = event_hubs["events"][event_type]
-
-    return {
-        "fully_qualified_namespace": event_hubs["fully_qualified_namespace"],
-        "eventhub_name": event_config["eventhub_name"],
-        "consumer_group": event_hubs["consumer_groups"][event_type],
+def get_schema_name(schema_key: str) -> str:
+    mapping = {
+        "bronze": "BRONZE_SCHEMA",
+        "silver": "SILVER_SCHEMA",
+        "gold": "GOLD_SCHEMA",
+        "monitoring": "MONITORING_SCHEMA",
     }
 
-def get_secret_config(environment: str = "dev") -> dict:
-    config = get_pipeline_config(environment)
-    return config["secrets"]
+    if schema_key not in mapping:
+        raise ValueError(f"Unsupported schema key: {schema_key}")
+
+    return get_required_conf(mapping[schema_key])
+
+
+def get_eventhub_config(event_type: str) -> dict:
+    mapping = {
+        "order_created": {
+            "eventhub_name": "EVENT_HUB_ORDERS_NAME",
+            "consumer_group": "EVENT_HUB_ORDERS_CONSUMER_GROUP",
+        },
+        "inventory_updated": {
+            "eventhub_name": "EVENT_HUB_INVENTORY_NAME",
+            "consumer_group": "EVENT_HUB_INVENTORY_CONSUMER_GROUP",
+        },
+        "shipment_created": {
+            "eventhub_name": "EVENT_HUB_SHIPMENTS_NAME",
+            "consumer_group": "EVENT_HUB_SHIPMENTS_CONSUMER_GROUP",
+        },
+        "supplier_performance": {
+            "eventhub_name": "EVENT_HUB_SUPPLIER_PERFORMANCE_NAME",
+            "consumer_group": "EVENT_HUB_SUPPLIER_PERFORMANCE_CONSUMER_GROUP",
+        },
+    }
+
+    if event_type not in mapping:
+        raise ValueError(f"Unsupported event type: {event_type}")
+
+    event_mapping = mapping[event_type]
+
+    return {
+        "fully_qualified_namespace": get_required_conf("EVENT_HUB_NAMESPACE"),
+        "eventhub_name": get_required_conf(event_mapping["eventhub_name"]),
+        "consumer_group": get_required_conf(event_mapping["consumer_group"]),
+    }

@@ -100,3 +100,4 @@ yarn-error.log*
 
 # Databricks bundle generated files
 .bundle/
+.databricks/

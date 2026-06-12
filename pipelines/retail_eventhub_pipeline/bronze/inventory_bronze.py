@@ -3,27 +3,14 @@ from __future__ import annotations
 from pyspark import pipelines as dp
 from pyspark.sql.functions import col, current_timestamp, lit
 
-from pipelines.retail_eventhub_pipeline.utils.config import (
-    get_catalog_name,
-    get_eventhub_config,
-    get_schema_name,
-)
-from pipelines.retail_eventhub_pipeline.utils.eventhub import (
-    build_eventhub_kafka_jaas_config,
-    get_eventhub_kafka_options,
-)
-
-
 ENVIRONMENT = spark.conf.get("ENVIRONMENT", "dev")
 
-catalog_name = get_catalog_name(ENVIRONMENT)
-bronze_schema = get_schema_name("bronze", ENVIRONMENT)
+catalog_name = spark.conf.get("CATALOG_NAME")
+bronze_schema = spark.conf.get("BRONZE_SCHEMA")
 
-eventhub_config = get_eventhub_config("inventory_updated", ENVIRONMENT)
-
-from pipelines.retail_eventhub_pipeline.utils.config import get_secret_config
-
-eventhub_config = get_eventhub_config("inventory_updated", ENVIRONMENT)
+EVENT_HUB_NAMESPACE = spark.conf.get("EVENT_HUB_NAMESPACE")
+EVENT_HUB_NAME = spark.conf.get("EVENT_HUB_INVENTORY_NAME")
+EVENT_HUB_CONSUMER_GROUP = spark.conf.get("EVENT_HUB_INVENTORY_CONSUMER_GROUP")
 
 EVENT_HUB_SECRET_SCOPE = spark.conf.get("EVENT_HUB_SECRET_SCOPE")
 EVENT_HUB_CONNECTION_SECRET_KEY = spark.conf.get("EVENT_HUB_CONNECTION_SECRET_KEY")
@@ -33,8 +20,34 @@ event_hub_connection_string = dbutils.secrets.get(
     key=EVENT_HUB_CONNECTION_SECRET_KEY,
 )
 
-kafka_jaas_config = build_eventhub_kafka_jaas_config(event_hub_connection_string)
 
+def build_eventhub_kafka_jaas_config(connection_string: str) -> str:
+    return (
+        "kafkashaded.org.apache.kafka.common.security.plain.PlainLoginModule "
+        "required "
+        'username="$ConnectionString" '
+        f'password="{connection_string}";'
+    )
+
+
+def get_eventhub_kafka_options(
+    fully_qualified_namespace: str,
+    eventhub_name: str,
+    consumer_group: str,
+    kafka_jaas_config: str,
+) -> dict[str, str]:
+    return {
+        "kafka.bootstrap.servers": f"{fully_qualified_namespace}:9093",
+        "subscribe": eventhub_name,
+        "kafka.security.protocol": "SASL_SSL",
+        "kafka.sasl.mechanism": "PLAIN",
+        "kafka.sasl.jaas.config": kafka_jaas_config,
+        "startingOffsets": "latest",
+        "failOnDataLoss": "false",
+        "kafka.group.id": consumer_group,
+    }
+
+kafka_jaas_config = build_eventhub_kafka_jaas_config(event_hub_connection_string)
 
 @dp.table(
     name=f"{catalog_name}.{bronze_schema}.inventory_events_raw",
@@ -42,9 +55,9 @@ kafka_jaas_config = build_eventhub_kafka_jaas_config(event_hub_connection_string
 )
 def inventory_events_raw():
     kafka_options = get_eventhub_kafka_options(
-        fully_qualified_namespace=eventhub_config["fully_qualified_namespace"],
-        eventhub_name=eventhub_config["eventhub_name"],
-        consumer_group=eventhub_config["consumer_group"],
+        fully_qualified_namespace=EVENT_HUB_NAMESPACE,
+        eventhub_name=EVENT_HUB_NAME,
+        consumer_group=EVENT_HUB_CONSUMER_GROUP,
         kafka_jaas_config=kafka_jaas_config,
     )
 

@@ -1,0 +1,38 @@
+resources:
+  pipelines:
+    retail_eventhub_pipeline:
+      name: retail-eventhub-pipeline-${bundle.target}
+      catalog: ${var.catalog_name}
+      target: ${var.bronze_schema}
+      continuous: false
+      development: true
+      photon: true
+      serverless: true
+
+      configuration:
+        ENVIRONMENT: ${var.environment}
+
+        CATALOG_NAME: ${var.catalog_name}
+        BRONZE_SCHEMA: ${var.bronze_schema}
+        SILVER_SCHEMA: ${var.silver_schema}
+        GOLD_SCHEMA: ${var.gold_schema}
+        MONITORING_SCHEMA: ${var.monitoring_schema}
+
+        EVENT_HUB_SECRET_SCOPE: ${var.event_hub_secret_scope}
+        EVENT_HUB_CONNECTION_SECRET_KEY: ${var.event_hub_connection_secret_key}
+
+        EVENT_HUB_NAMESPACE: ${var.event_hub_namespace}
+
+        EVENT_HUB_ORDERS_NAME: ${var.event_hub_orders_name}
+        EVENT_HUB_INVENTORY_NAME: ${var.event_hub_inventory_name}
+        EVENT_HUB_SHIPMENTS_NAME: ${var.event_hub_shipments_name}
+        EVENT_HUB_SUPPLIER_PERFORMANCE_NAME: ${var.event_hub_supplier_performance_name}
+
+        EVENT_HUB_ORDERS_CONSUMER_GROUP: ${var.event_hub_orders_consumer_group}
+        EVENT_HUB_INVENTORY_CONSUMER_GROUP: ${var.event_hub_inventory_consumer_group}
+        EVENT_HUB_SHIPMENTS_CONSUMER_GROUP: ${var.event_hub_shipments_consumer_group}
+        EVENT_HUB_SUPPLIER_PERFORMANCE_CONSUMER_GROUP: ${var.event_hub_supplier_performance_consumer_group}
+
+      libraries:
+        - glob:
+            include: ../pipelines/retail_eventhub_pipeline/**

@@ -2,16 +2,14 @@
 
 # COMMAND ----------
 
-from src.common.config_loader import load_config
-
-config = load_config("dev")
-
-catalog_name = config["unity_catalog"]["catalog"]
-gold_schema = config["unity_catalog"]["schemas"]["gold"]
-monitoring_schema = config["unity_catalog"]["schemas"]["monitoring"]
+environment = dbutils.widgets.get("environment")
+catalog_name = dbutils.widgets.get("catalog_name")
+gold_schema = dbutils.widgets.get("gold_schema")
+monitoring_schema = dbutils.widgets.get("monitoring_schema")
 
 dq_table = f"{catalog_name}.{monitoring_schema}.data_quality_results"
 
+print(f"Environment: {environment}")
 print(f"Catalog: {catalog_name}")
 print(f"Gold schema: {gold_schema}")
 print(f"Monitoring schema: {monitoring_schema}")
@@ -520,7 +518,7 @@ dq_results_df = spark.createDataFrame(dq_results)
 
 dq_results_df = (
     dq_results_df
-    .withColumn("environment", lit(config["environment"]))
+    .withColumn("environment", lit(environment))
     .withColumn("pipeline_layer", lit("gold"))
     .withColumn("validated_at", current_timestamp())
 )

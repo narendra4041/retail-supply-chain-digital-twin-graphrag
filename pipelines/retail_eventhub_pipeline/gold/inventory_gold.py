@@ -12,17 +12,11 @@ from pyspark.sql.functions import (
     when,
 )
 
-from pipelines.retail_eventhub_pipeline.utils.config import (
-    get_catalog_name,
-    get_schema_name,
-)
-
-
 ENVIRONMENT = spark.conf.get("ENVIRONMENT", "dev")
 
-catalog_name = get_catalog_name(ENVIRONMENT)
-silver_schema = get_schema_name("silver", ENVIRONMENT)
-gold_schema = get_schema_name("gold", ENVIRONMENT)
+catalog_name = spark.conf.get("CATALOG_NAME")
+silver_schema = spark.conf.get("SILVER_SCHEMA")
+gold_schema = spark.conf.get("GOLD_SCHEMA")
 
 SILVER_INVENTORY_MOVEMENTS_TABLE = (
     f"{catalog_name}.{silver_schema}.inventory_movements"
